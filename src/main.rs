@@ -1,15 +1,16 @@
 use std::{net::IpAddr, str::FromStr};
 
 use clap::Parser;
-use color_eyre::eyre::{self, Context};
+use color_eyre::eyre::{self, Context, ContextCompat};
 use iroh::{
-    Endpoint, EndpointAddr, EndpointId, RelayMap, RelayUrl,
+    Endpoint, RelayMap, RelayUrl,
     address_lookup::MemoryLookup,
     endpoint::{Connection, presets},
     protocol::{AcceptError, ProtocolHandler, Router},
 };
 use iroh_relay::server::{RelayConfig, Server, ServerConfig};
 use iroh_tickets::endpoint::EndpointTicket;
+use noq::StreamAffinity;
 
 const ALPN: &[u8] = b"iroh-testing/0.1.0\0";
 
@@ -17,6 +18,17 @@ const ALPN: &[u8] = b"iroh-testing/0.1.0\0";
 struct ClientArgs {
     #[arg(short, long)]
     ticket: String,
+
+    #[arg(long, default_value = "http")]
+    scheme: String,
+
+    /// Address to bind the relay HTTP server to
+    #[arg(long, default_value = "127.0.0.1")]
+    host: String,
+
+    /// Port to bind the relay HTTP server to
+    #[arg(long, default_value_t = 8383)]
+    port: u16,
 }
 
 #[derive(Parser)]
@@ -31,9 +43,23 @@ struct RelayArgs {
 }
 
 #[derive(Parser)]
+struct ServerArgs {
+    #[arg(long, default_value = "http")]
+    scheme: String,
+
+    /// Address to bind the relay HTTP server to
+    #[arg(long, default_value = "127.0.0.1")]
+    host: String,
+
+    /// Port to bind the relay HTTP server to
+    #[arg(long, default_value_t = 8383)]
+    port: u16,
+}
+
+#[derive(Parser)]
 enum Args {
     Client(ClientArgs),
-    Server,
+    Server(ServerArgs),
     Relay(RelayArgs),
 }
 
@@ -46,15 +72,16 @@ async fn main() -> eyre::Result<()> {
 
     match args {
         Args::Client(client_args) => run_client(&client_args).await?,
-        Args::Server => run_server(&args).await?,
+        Args::Server(server_args) => run_server(&server_args).await?,
         Args::Relay(relay_args) => run_relay(&relay_args).await?,
     }
 
     Ok(())
 }
 
-async fn create_endpoint() -> eyre::Result<Endpoint> {
-    let relay_url = RelayUrl::from_str("http://127.0.0.1:8383").unwrap();
+async fn create_endpoint(scheme: &str, host: &str, port: u16) -> eyre::Result<Endpoint> {
+    let host_str = format!("{scheme}://{host}:{port}");
+    let relay_url = RelayUrl::from_str(&host_str).unwrap();
     let relay_map = RelayMap::from_iter(vec![relay_url]);
 
     let address_lookup = MemoryLookup::new();
@@ -71,29 +98,34 @@ async fn create_endpoint() -> eyre::Result<Endpoint> {
 
 async fn run_client(args: &ClientArgs) -> eyre::Result<()> {
     tracing::debug!("running client");
-    let ep = create_endpoint().await.wrap_err("creating endpoint")?;
+    let ep = create_endpoint(&args.scheme, &args.host, args.port)
+        .await
+        .wrap_err("creating endpoint")?;
     ep.online().await;
 
-    // let ticket: EndpointTicket = args.ticket.parse().wrap_err("invalid ticket")?;
-    let ep_id: EndpointId = args.ticket.parse().wrap_err("invalid endpoint id")?;
-
-    let addr = EndpointAddr::new(ep_id).with_relay_url("http://127.0.0.1:8383".parse()?);
+    let ticket: EndpointTicket = args.ticket.parse().wrap_err("invalid ticket")?;
 
     tracing::debug!("connecting");
-    let conn = ep.connect(addr, ALPN).await.wrap_err("connecting")?;
+    let conn = ep.connect(ticket, ALPN).await.wrap_err("connecting")?;
     tracing::debug!("connected");
 
-    for path in conn.paths().iter() {
-        eprintln!("Path: {}", path.id());
-        eprintln!("\tremote address: {}", path.remote_addr());
-        eprintln!("\tlocal address: {:?}", path.local_addr());
-        eprintln!("\tis selected: {}", path.is_selected());
-        eprintln!("\tis_ip: {}", path.is_ip());
-        eprintln!("\tis_relay: {}", path.is_relay());
-        eprintln!("\trtt: {:?}", path.rtt());
-    }
+    tracing::debug!("finding direct paths");
+    let mut paths = conn.paths_stream();
+    let direct_path = paths
+        .wait_any(|p| p.is_ip())
+        .await
+        .wrap_err("connection closed")?;
+
+    tracing::debug!("using direct path: {}", direct_path.id());
+    eprintln!("remote address: {}", direct_path.remote_addr());
+    eprintln!("local address: {:?}", direct_path.local_addr());
+    eprintln!("is selected: {}", direct_path.is_selected());
+    eprintln!("is_ip: {}", direct_path.is_ip());
+    eprintln!("is_relay: {}", direct_path.is_relay());
+    eprintln!("rtt: {:?}", direct_path.rtt());
 
     let (mut send_stream, mut recv_stream) = conn.open_bi().await.wrap_err("open bi")?;
+    send_stream.set_affinity(StreamAffinity::Sticky(direct_path.id()))?;
 
     tracing::debug!("sending request");
     send_stream
@@ -136,9 +168,11 @@ impl ProtocolHandler for Echo {
     }
 }
 
-async fn run_server(_args: &Args) -> eyre::Result<()> {
+async fn run_server(args: &ServerArgs) -> eyre::Result<()> {
     tracing::debug!("running server");
-    let ep = create_endpoint().await.wrap_err("creating endpoint")?;
+    let ep = create_endpoint(&args.scheme, &args.host, args.port)
+        .await
+        .wrap_err("creating endpoint")?;
     ep.online().await;
 
     let addr = ep.addr();
