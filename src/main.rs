@@ -28,6 +28,10 @@ struct ClientArgs {
     /// Port to bind the relay HTTP server to
     #[arg(long, default_value_t = 8383)]
     port: u16,
+
+    /// Wait for relay connection before sending
+    #[arg(short, long)]
+    wait: bool,
 }
 
 #[derive(Parser)]
@@ -99,7 +103,9 @@ async fn run_client(args: &ClientArgs) -> eyre::Result<()> {
     let ep = create_endpoint(&args.scheme, &args.host, args.port)
         .await
         .wrap_err("creating endpoint")?;
-    ep.online().await;
+    if args.wait {
+        ep.online().await;
+    }
 
     let ticket: EndpointTicket = args.ticket.parse().wrap_err("invalid ticket")?;
 
