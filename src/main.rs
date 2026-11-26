@@ -6,7 +6,7 @@ use std::{
 use clap::Parser;
 use color_eyre::eyre::{self, Context};
 use iroh::{
-    Endpoint, RelayMap, RelayUrl,
+    Endpoint, EndpointAddr, EndpointId, RelayMap, RelayUrl,
     address_lookup::{DnsAddressLookup, MemoryLookup},
     dns::{DnsResolver, NameserverConfig},
     endpoint::presets,
@@ -130,6 +130,32 @@ async fn create_endpoint(scheme: &str, host: &str, port: u16) -> eyre::Result<En
     Ok(ep)
 }
 
+enum EndpointToken {
+    Ticket(EndpointTicket),
+    Id(EndpointId),
+}
+
+impl From<EndpointToken> for EndpointAddr {
+    fn from(value: EndpointToken) -> Self {
+        match value {
+            EndpointToken::Ticket(endpoint_ticket) => endpoint_ticket.into(),
+            EndpointToken::Id(public_key) => public_key.into(),
+        }
+    }
+}
+
+fn parse_token(input: &str) -> eyre::Result<EndpointToken> {
+    if let Ok(ticket) = input.parse::<EndpointTicket>() {
+        return Ok(EndpointToken::Ticket(ticket));
+    }
+
+    if let Ok(id) = input.parse::<EndpointId>() {
+        return Ok(EndpointToken::Id(id));
+    }
+
+    eyre::bail!("Bad input for ticket or id: {input}");
+}
+
 async fn run_client(args: &ClientArgs) -> eyre::Result<()> {
     tracing::debug!("running client");
     let ep = create_endpoint(&args.scheme, &args.host, args.port)
@@ -139,11 +165,12 @@ async fn run_client(args: &ClientArgs) -> eyre::Result<()> {
         ep.online().await;
     }
 
-    let ticket: EndpointTicket = args.ticket.parse().wrap_err("invalid ticket")?;
+    let token = parse_token(&args.ticket).wrap_err("invalid token")?;
+    // let ticket: EndpointTicket = args.ticket.parse().wrap_err("invalid ticket")?;
 
     tracing::debug!("connecting");
     let conn = ep
-        .connect(ticket, args.protocol.alpn())
+        .connect(token, args.protocol.alpn())
         .await
         .wrap_err("connecting")?;
     tracing::debug!("connected");

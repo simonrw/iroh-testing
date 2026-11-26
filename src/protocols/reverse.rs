@@ -17,7 +17,9 @@ impl ProtocolHandler for Reverse {
         tracing::debug!("read message");
 
         let response_message = msg.into_iter().rev().collect::<Vec<_>>();
-        send.write_all(&response_message).await.std_context("write")?;
+        send.write_all(&response_message)
+            .await
+            .std_context("write")?;
 
         send.finish()?;
         connection.closed().await;
