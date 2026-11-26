@@ -7,9 +7,9 @@ use clap::Parser;
 use color_eyre::eyre::{self, Context};
 use iroh::{
     Endpoint, EndpointAddr, EndpointId, RelayMap, RelayUrl,
-    address_lookup::{DnsAddressLookup, MemoryLookup},
+    address_lookup::{DnsAddressLookup, PkarrPublisher},
     dns::{DnsResolver, NameserverConfig},
-    endpoint::presets,
+    endpoint::{Builder, presets},
     protocol::Router,
 };
 use iroh_relay::server::{RelayConfig, Server, ServerConfig};
@@ -98,7 +98,8 @@ async fn run_dns(_args: &DnsArgs) -> eyre::Result<()> {
     let mut config = iroh_dns_server::config::Config::default();
     config.dns.port = 5900;
     config.dns.origins = vec!["foo.".to_string(), ".".to_string()];
-    config.dns.default_soa = "dns1.irohdns.example hostmaster.irohdns.example 0 10800 3600 604800 3600".to_string();
+    config.dns.default_soa =
+        "dns1.irohdns.example hostmaster.irohdns.example 0 10800 3600 604800 3600".to_string();
     let server = iroh_dns_server::Server::bind(config)
         .await
         .wrap_err("binding server")?;
@@ -106,7 +107,8 @@ async fn run_dns(_args: &DnsArgs) -> eyre::Result<()> {
     Ok(())
 }
 
-async fn create_endpoint(scheme: &str, host: &str, port: u16) -> eyre::Result<Endpoint> {
+/// Builds an endpoint that uses the local relay and resolves endpoint ids through the local DNS server.
+fn endpoint_builder(scheme: &str, host: &str, port: u16) -> Builder {
     let host_str = format!("{scheme}://{host}:{port}");
     let relay_url = RelayUrl::from_str(&host_str).unwrap();
     let relay_map = RelayMap::from_iter(vec![relay_url]);
@@ -121,13 +123,10 @@ async fn create_endpoint(scheme: &str, host: &str, port: u16) -> eyre::Result<En
         .dns_resolver(resolver)
         .build();
 
-    let ep = Endpoint::builder(presets::Minimal)
+    Endpoint::builder(presets::Minimal)
         .address_lookup(address_lookup)
         .relay_mode(iroh::RelayMode::Custom(relay_map))
-        // .relay_mode(iroh::RelayMode::Disabled)
-        .bind()
-        .await?;
-    Ok(ep)
+    // .relay_mode(iroh::RelayMode::Disabled)
 }
 
 enum EndpointToken {
@@ -158,7 +157,8 @@ fn parse_token(input: &str) -> eyre::Result<EndpointToken> {
 
 async fn run_client(args: &ClientArgs) -> eyre::Result<()> {
     tracing::debug!("running client");
-    let ep = create_endpoint(&args.scheme, &args.host, args.port)
+    let ep = endpoint_builder(&args.scheme, &args.host, args.port)
+        .bind()
         .await
         .wrap_err("creating endpoint")?;
     if args.wait {
@@ -216,7 +216,13 @@ async fn run_client(args: &ClientArgs) -> eyre::Result<()> {
 
 async fn run_server(args: &ServerArgs) -> eyre::Result<()> {
     tracing::debug!("running server");
-    let ep = create_endpoint(&args.scheme, &args.host, args.port)
+
+    // The DNS server only serves records that endpoints have published to its pkarr HTTP API
+    let publisher = PkarrPublisher::builder("http://127.0.0.1:8080/pkarr".parse().unwrap());
+
+    let ep = endpoint_builder(&args.scheme, &args.host, args.port)
+        .address_lookup(publisher)
+        .bind()
         .await
         .wrap_err("creating endpoint")?;
     ep.online().await;
