@@ -1681,6 +1681,7 @@ dependencies = [
  "iroh",
  "iroh-relay",
  "iroh-tickets",
+ "n0-error",
  "noq",
  "tokio",
  "tracing",

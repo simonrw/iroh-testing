@@ -1,23 +1,22 @@
 use std::{net::IpAddr, str::FromStr};
 
 use clap::Parser;
-use color_eyre::eyre::{self, Context, ContextCompat};
+use color_eyre::eyre::{self, Context};
 use iroh::{
-    Endpoint, RelayMap, RelayUrl,
-    address_lookup::MemoryLookup,
-    endpoint::{Connection, presets},
-    protocol::{AcceptError, ProtocolHandler, Router},
+    Endpoint, RelayMap, RelayUrl, address_lookup::MemoryLookup, endpoint::presets, protocol::Router,
 };
 use iroh_relay::server::{RelayConfig, Server, ServerConfig};
 use iroh_tickets::endpoint::EndpointTicket;
-use noq::StreamAffinity;
 
-const ALPN: &[u8] = b"iroh-testing/0.1.0\0";
+mod protocols;
 
 #[derive(Parser)]
 struct ClientArgs {
     #[arg(short, long)]
     ticket: String,
+
+    #[arg(short, long)]
+    protocol: protocols::Protocols,
 
     #[arg(long, default_value = "http")]
     scheme: String,
@@ -87,7 +86,6 @@ async fn create_endpoint(scheme: &str, host: &str, port: u16) -> eyre::Result<En
     let address_lookup = MemoryLookup::new();
 
     let ep = Endpoint::builder(presets::Minimal)
-        .alpns(vec![ALPN.to_vec()])
         .address_lookup(address_lookup)
         .relay_mode(iroh::RelayMode::Custom(relay_map))
         // .relay_mode(iroh::RelayMode::Disabled)
@@ -106,26 +104,24 @@ async fn run_client(args: &ClientArgs) -> eyre::Result<()> {
     let ticket: EndpointTicket = args.ticket.parse().wrap_err("invalid ticket")?;
 
     tracing::debug!("connecting");
-    let conn = ep.connect(ticket, ALPN).await.wrap_err("connecting")?;
+    let conn = ep
+        .connect(ticket, args.protocol.alpn())
+        .await
+        .wrap_err("connecting")?;
     tracing::debug!("connected");
 
-    tracing::debug!("finding direct paths");
-    let mut paths = conn.paths_stream();
-    let direct_path = paths
-        .wait_any(|p| p.is_ip())
-        .await
-        .wrap_err("connection closed")?;
-
-    tracing::debug!("using direct path: {}", direct_path.id());
-    eprintln!("remote address: {}", direct_path.remote_addr());
-    eprintln!("local address: {:?}", direct_path.local_addr());
-    eprintln!("is selected: {}", direct_path.is_selected());
-    eprintln!("is_ip: {}", direct_path.is_ip());
-    eprintln!("is_relay: {}", direct_path.is_relay());
-    eprintln!("rtt: {:?}", direct_path.rtt());
+    for path in conn.paths().iter() {
+        tracing::debug!("using direct path: {}", path.id());
+        eprintln!("remote address: {}", path.remote_addr());
+        eprintln!("local address: {:?}", path.local_addr());
+        eprintln!("is selected: {}", path.is_selected());
+        eprintln!("is_ip: {}", path.is_ip());
+        eprintln!("is_relay: {}", path.is_relay());
+        eprintln!("rtt: {:?}", path.rtt());
+    }
 
     let (mut send_stream, mut recv_stream) = conn.open_bi().await.wrap_err("open bi")?;
-    send_stream.set_affinity(StreamAffinity::Sticky(direct_path.id()))?;
+    // send_stream.set_affinity(StreamAffinity::Sticky(direct_path.id()))?;
 
     tracing::debug!("sending request");
     send_stream
@@ -133,6 +129,7 @@ async fn run_client(args: &ClientArgs) -> eyre::Result<()> {
         .await
         .wrap_err("sending hello")?;
     tracing::debug!("reading response");
+    send_stream.finish()?;
 
     let mut buf = [0u8; 10];
     let Some(n_bytes) = recv_stream.read(&mut buf).await? else {
@@ -152,22 +149,6 @@ async fn run_client(args: &ClientArgs) -> eyre::Result<()> {
     Ok(())
 }
 
-#[derive(Debug, Clone)]
-struct Echo;
-
-impl ProtocolHandler for Echo {
-    async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
-        let (mut send, mut recv) = connection.accept_bi().await?;
-        let bytes_sent = tokio::io::copy(&mut recv, &mut send).await?;
-
-        tracing::debug!(%bytes_sent, "handled connection");
-
-        send.finish()?;
-        connection.closed().await;
-        Ok(())
-    }
-}
-
 async fn run_server(args: &ServerArgs) -> eyre::Result<()> {
     tracing::debug!("running server");
     let ep = create_endpoint(&args.scheme, &args.host, args.port)
@@ -181,9 +162,14 @@ async fn run_server(args: &ServerArgs) -> eyre::Result<()> {
     let ticket = EndpointTicket::new(addr);
     println!("Connect with {ticket}");
 
-    let _router = Router::builder(ep).accept(ALPN, Echo).spawn();
+    let router = Router::builder(ep)
+        .accept(protocols::echo::ALPN, protocols::echo::Echo)
+        .accept(protocols::reverse::ALPN, protocols::reverse::Reverse)
+        .spawn();
 
     tokio::signal::ctrl_c().await?;
+
+    router.shutdown().await?;
     Ok(())
 }
 
