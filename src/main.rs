@@ -1,9 +1,16 @@
-use std::{net::IpAddr, str::FromStr};
+use std::{
+    net::{IpAddr, Ipv4Addr},
+    str::FromStr,
+};
 
 use clap::Parser;
 use color_eyre::eyre::{self, Context};
 use iroh::{
-    Endpoint, RelayMap, RelayUrl, address_lookup::MemoryLookup, endpoint::presets, protocol::Router,
+    Endpoint, RelayMap, RelayUrl,
+    address_lookup::{DnsAddressLookup, MemoryLookup},
+    dns::{DnsResolver, NameserverConfig},
+    endpoint::presets,
+    protocol::Router,
 };
 use iroh_relay::server::{RelayConfig, Server, ServerConfig};
 use iroh_tickets::endpoint::EndpointTicket;
@@ -60,10 +67,14 @@ struct ServerArgs {
 }
 
 #[derive(Parser)]
+struct DnsArgs {}
+
+#[derive(Parser)]
 enum Args {
     Client(ClientArgs),
     Server(ServerArgs),
     Relay(RelayArgs),
+    Dns(DnsArgs),
 }
 
 #[tokio::main]
@@ -77,8 +88,21 @@ async fn main() -> eyre::Result<()> {
         Args::Client(client_args) => run_client(&client_args).await?,
         Args::Server(server_args) => run_server(&server_args).await?,
         Args::Relay(relay_args) => run_relay(&relay_args).await?,
+        Args::Dns(dns_args) => run_dns(&dns_args).await?,
     }
 
+    Ok(())
+}
+
+async fn run_dns(_args: &DnsArgs) -> eyre::Result<()> {
+    let mut config = iroh_dns_server::config::Config::default();
+    config.dns.port = 5900;
+    config.dns.origins = vec!["foo.".to_string(), ".".to_string()];
+    config.dns.default_soa = "dns1.irohdns.example hostmaster.irohdns.example 0 10800 3600 604800 3600".to_string();
+    let server = iroh_dns_server::Server::bind(config)
+        .await
+        .wrap_err("binding server")?;
+    server.join().await?;
     Ok(())
 }
 
@@ -87,7 +111,15 @@ async fn create_endpoint(scheme: &str, host: &str, port: u16) -> eyre::Result<En
     let relay_url = RelayUrl::from_str(&host_str).unwrap();
     let relay_map = RelayMap::from_iter(vec![relay_url]);
 
-    let address_lookup = MemoryLookup::new();
+    let addr: Ipv4Addr = "127.0.0.1".parse().unwrap();
+    let nameserver = NameserverConfig::udp(IpAddr::V4(addr)).with_port(5900);
+
+    let resolver = DnsResolver::builder()
+        .add_nameserver_config(nameserver)
+        .build();
+    let address_lookup = DnsAddressLookup::builder("foo.".to_string())
+        .dns_resolver(resolver)
+        .build();
 
     let ep = Endpoint::builder(presets::Minimal)
         .address_lookup(address_lookup)

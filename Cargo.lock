@@ -1466,7 +1466,7 @@ dependencies = [
  "ipnet",
  "jni 0.22.4",
  "once_cell",
- "prefix-trie",
+ "prefix-trie 0.10.2",
  "rand 0.10.4",
  "ring",
  "serde",
@@ -1507,9 +1507,9 @@ dependencies = [
 
 [[package]]
 name = "hickory-server"
-version = "0.26.4"
+version = "0.26.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bc612071fc85d6eda57193a56961e25768159afcf859085dee44827f19a960c8"
+checksum = "950c2ad9ba2ad35d6890b725baff91305f65b87d7719a6c6071514dc70f13eeb"
 dependencies = [
  "async-trait",
  "bytes",
@@ -1522,7 +1522,7 @@ dependencies = [
  "hickory-resolver",
  "http",
  "ipnet",
- "prefix-trie",
+ "prefix-trie 0.8.4",
  "rustls",
  "serde",
  "thiserror 2.0.21",
@@ -3081,6 +3081,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "85eae3c4ed2f50dcfe72643da4befc30deadb458a9b590d720cde2f2b1e97da9"
 dependencies = [
  "zerocopy",
+]
+
+[[package]]
+name = "prefix-trie"
+version = "0.8.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4cf6e3177f0684016a5c209b00882e15f8bdd3f3bb48f0491df10cd102d0c6e7"
+dependencies = [
+ "either",
+ "ipnet",
+ "num-traits",
 ]
 
 [[package]]
